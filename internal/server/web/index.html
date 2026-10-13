@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TSG 内存优化器</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--accent2:#238636;--warn:#d29922;--danger:#da3633;--ok:#3fb950;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border)}
+.header h1{font-size:18px;font-weight:600;display:flex;align-items:center;gap:10px}
+.header .badge{font-size:11px;background:var(--accent);color:#fff;padding:2px 8px;border-radius:12px}
+.nav{display:flex;gap:4px;padding:8px 24px;border-bottom:1px solid var(--border);background:var(--card)}
+.nav button{background:none;border:none;color:var(--muted);padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;transition:.15s}
+.nav button.active{background:var(--accent);color:#fff}
+.nav button:hover{color:var(--text)}
+.container{padding:24px;max-width:1200px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.card h3{font-size:14px;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
+.gauge{display:flex;align-items:center;justify-content:center;position:relative;width:160px;height:160px;margin:0 auto}
+.gauge svg{transform:rotate(-90deg)}
+.gauge text{transform:rotate(90deg);font-size:28px;font-weight:700;fill:var(--text)}
+.gauge-label{text-align:center;margin-top:8px;font-size:13px;color:var(--muted)}
+.kpi{display:flex;justify-content:space-around;margin-top:12px}
+.kpi div{text-align:center}
+.kpi .num{font-size:20px;font-weight:700}
+.kpi .lbl{font-size:11px;color:var(--muted);margin-top:2px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:8px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+.btn-primary{background:var(--accent2);color:#fff}
+.btn-primary:hover{background:#2ea043}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-warn{background:var(--warn);color:#000}
+.btn-block{width:100%;justify-content:center;margin-top:12px}
+.clean-result{margin-top:12px;padding:12px;background:rgba(88,166,255,.08);border:1px solid var(--accent);border-radius:8px;font-size:13px}
+.clean-result.error{border-color:var(--danger);background:rgba(218,54,51,.08)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--muted);font-weight:500;padding:10px 8px;border-bottom:1px solid var(--border)}
+td{padding:8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,.04)}
+.process-name{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kill-btn{font-size:11px;padding:4px 10px;border-radius:4px;border:none;background:var(--danger);color:#fff;cursor:pointer}
+.profile-list{display:flex;flex-direction:column;gap:8px}
+.profile-item{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--bg);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:.15s}
+.profile-item:hover{border-color:var(--accent)}
+.profile-item.active{border-color:var(--accent2);background:rgba(35,134,54,.06)}
+.profile-item h4{font-size:14px;margin-bottom:2px}
+.profile-item p{font-size:12px;color:var(--muted)}
+.settings-group{margin-bottom:20px}
+.settings-group h4{font-size:13px;color:var(--muted);margin-bottom:10px;text-transform:uppercase}
+.settings-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
+.settings-row label{font-size:14px}
+input[type="number"],select{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;min-width:120px}
+input[type="checkbox"]{width:18px;height:18px;accent-color:var(--accent2)}
+.update-box{margin-top:12px;padding:12px;border-radius:8px;font-size:13px}
+.update-box.has{background:rgba(88,166,255,.08);border:1px solid var(--accent)}
+.hidden{display:none}
+canvas{width:100%;height:200px}
+.footer{text-align:center;padding:24px;color:var(--muted);font-size:12px}
+.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:13px;z-index:100;transform:translateY(120%);transition:.3s}
+.toast.show{transform:translateY(0)}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg> TSG 内存优化器 <span class="badge" id="verBadge">v1.0.0</span></h1>
+  <div style="font-size:12px;color:var(--muted)" id="statusText">就绪</div>
+</div>
+<div class="nav">
+  <button class="active" onclick="showTab('dash')">仪表盘</button>
+  <button onclick="showTab('processes')">进程</button>
+  <button onclick="showTab('profiles')">职业模式</button>
+  <button onclick="showTab('settings')">设置</button>
+</div>
+<div class="container">
+  <div id="tab-dash">
+    <div class="grid">
+      <div class="card">
+        <h3>内存使用率</h3>
+        <div class="gauge">
+          <svg width="160" height="160"><circle cx="80" cy="80" r="70" fill="none" stroke="var(--border)" stroke-width="12"/><circle id="gaugeCircle" cx="80" cy="80" r="70" fill="none" stroke="var(--accent)" stroke-width="12" stroke-dasharray="440" stroke-dashoffset="0" stroke-linecap="round"/></svg>
+          <text id="gaugeText" x="80" y="88" text-anchor="middle">0%</text>
+        </div>
+        <div class="gauge-label" id="gaugeLabel">计算中...</div>
+        <div class="kpi">
+          <div><div class="num" id="totalMem">-</div><div class="lbl">总内存</div></div>
+          <div><div class="num" id="usedMem">-</div><div class="lbl">已用</div></div>
+          <div><div class="num" id="freeMem">-</div><div class="lbl">可用</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>内存趋势 (3分钟)</h3>
+        <canvas id="memChart" height="200"></canvas>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>一键清理</h3>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:12px">释放系统缓存与临时文件，根据当前职业模式选择清理深度。</p>
+        <button class="btn btn-primary btn-block" onclick="doClean()" id="cleanBtn">开始清理</button>
+        <div id="cleanResult" class="hidden"></div>
+      </div>
+      <div class="card">
+        <h3>系统负载</h3>
+        <div class="kpi" style="margin-top:24px">
+          <div><div class="num" id="load1">-</div><div class="lbl">1分钟</div></div>
+          <div><div class="num" id="load5">-</div><div class="lbl">5分钟</div></div>
+          <div><div class="num" id="load15">-</div><div class="lbl">15分钟</div></div>
+        </div>
+        <div style="margin-top:20px;font-size:13px;color:var(--muted)">
+          进程数: <span id="procCount" style="color:var(--text);font-weight:600">-</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="tab-processes" class="hidden">
+    <div class="card">
+      <h3>内存占用排行</h3>
+      <table>
+        <thead><tr><th>PID</th><th>名称</th><th>内存 (MB)</th><th>操作</th></tr></thead>
+        <tbody id="procTable"></tbody>
+      </table>
+    </div>
+  </div>
+  <div id="tab-profiles" class="hidden">
+    <div class="card">
+      <h3>选择职业模式</h3>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px">不同模式会自动调整内存保护策略与清理强度。</p>
+      <div class="profile-list" id="profileList"></div>
+    </div>
+  </div>
+  <div id="tab-settings" class="hidden">
+    <div class="card">
+      <h3>设置</h3>
+      <div class="settings-group">
+        <div class="settings-row"><label>自动清理阈值 (%)</label><input type="number" id="cfgThreshold" min="50" max="99" onchange="saveConfig()"></div>
+        <div class="settings-row"><label>自动关闭高内存进程</label><input type="checkbox" id="cfgAutoKill" onchange="saveConfig()"></div>
+        <div class="settings-row"><label>关闭阈值 (MB)</label><input type="number" id="cfgKillTh" min="100" max="10000" onchange="saveConfig()"></div>
+        <div class="settings-row"><label>默认清理等级</label>
+          <select id="cfgLevel" onchange="saveConfig()">
+            <option value="light">轻度 — 仅临时文件</option>
+            <option value="standard">标准 — 含缓存</option>
+            <option value="deep">深度 — 含日志与回收站</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="checkUpdate()">检查更新</button>
+      <div id="updateBox" class="update-box hidden"></div>
+    </div>
+  </div>
+  <div class="footer">TSGMemOptimizer — 本地运行，不上传任何数据</div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+let histData=[],currentProfile='balanced';
+async function api(path,opts={}){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r.json();}
+function showTab(id){document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));event.target.classList.add('active');['dash','processes','profiles','settings'].forEach(t=>document.getElementById('tab-'+t).classList.add('hidden'));document.getElementById('tab-'+id).classList.remove('hidden');}
+function fmtBytes(b){const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++}return b.toFixed(1)+' '+u[i];}
+function setGauge(pct){const c=document.getElementById('gaugeCircle'),t=document.getElementById('gaugeText'),max=440,off=max*(1-pct/100);c.style.strokeDashoffset=off;c.style.stroke=pct>90?'var(--danger)':pct>75?'var(--warn)':'var(--accent)';t.textContent=Math.round(pct)+'%';}
+function drawChart(){const cv=document.getElementById('memChart'),ctx=cv.getContext('2d'),w=cv.width=cv.clientWidth,h=cv.height=200;if(histData.length<2)return;ctx.clearRect(0,0,w,h);const pad=30,maxV=Math.max(100,...histData.map(d=>d.usagePercent));ctx.strokeStyle='var(--border)';ctx.beginPath();for(let i=0;i<=4;i++){const y=pad+(h-pad*2)*(i/4);ctx.moveTo(pad,y);ctx.lineTo(w-pad,y);}ctx.stroke();ctx.strokeStyle='var(--accent)';ctx.lineWidth=2;ctx.beginPath();histData.forEach((d,i)=>{const x=pad+(w-pad*2)*(i/(histData.length-1||1));const y=pad+(h-pad*2)*(1-d.usagePercent/maxV);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();}
+async function refresh(){try{const m=await api('/api/memory');const s=m.system;setGauge(s.usagePercent);document.getElementById('gaugeLabel').textContent=s.usagePercent>90?'内存紧张，建议清理':s.usagePercent>75?'内存占用较高':'内存状态良好';document.getElementById('totalMem').textContent=fmtBytes(s.total);document.getElementById('usedMem').textContent=fmtBytes(s.used);document.getElementById('freeMem').textContent=fmtBytes(s.available);document.getElementById('load1').textContent=s.load[0].toFixed(2);document.getElementById('load5').textContent=s.load[1].toFixed(2);document.getElementById('load15').textContent=s.load[2].toFixed(2);const h=await api('/api/memory/history');histData=h;drawChart();const pr=await api('/api/processes');document.getElementById('procCount').textContent=pr.summary.count;renderProcs(pr.processes);}catch(e){console.error(e);}}
+function renderProcs(list){const tb=document.getElementById('procTable');tb.innerHTML=list.slice(0,50).map(p=>`<tr><td>${p.pid}</td><td class="process-name" title="${p.command||p.name}">${p.name}</td><td>${p.rssMB.toFixed(1)}</td><td><button class="kill-btn" onclick="killProc(${p.pid})">结束</button></td></tr>`).join('');}
+async function killProc(pid){if(!confirm('确定结束进程 '+pid+' ?'))return;await api('/api/kill?pid='+pid,{method:'POST'});showToast('已结束进程 '+pid);refresh();}
+async function doClean(){const btn=document.getElementById('cleanBtn'),res=document.getElementById('cleanResult');btn.disabled=true;btn.textContent='清理中...';try{const r=await api('/api/clean',{method:'POST'});res.className='clean-result';res.innerHTML=`释放了 <b>${fmtBytes(r.freedBytes)}</b>，耗时 ${r.durationMs}ms<br>清理路径: ${r.cleanedPaths.length} 个${r.errors.length?'<br>警告: '+r.errors.join('; '):''}`;}catch(e){res.className='clean-result error';res.innerHTML='清理失败: '+e.message;}btn.disabled=false;btn.textContent='开始清理';res.classList.remove('hidden');refresh();}
+async function loadProfiles(){const d=await api('/api/profiles');currentProfile=d.current;const el=document.getElementById('profileList');const map={balanced:{icon:'⚖️'},office:{icon:'📄'},dev:{icon:'💻'},gaming:{icon:'🎮'},ai:{icon:'🤖'}};el.innerHTML=d.profiles.map(p=>`<div class="profile-item ${p.name===d.current?'active':''}" onclick="setProfile('${p.name}')"><div><h4>${map[p.name]?.icon||''} ${p.label}</h4><p>${p.description}</p></div><div style="font-size:12px;color:var(--muted)">${p.cleanLevel} / 阈值${p.autoThreshold}%</div></div>`).join('');}
+async function setProfile(name){await api('/api/profile?name='+name,{method:'POST'});showToast('已切换到 '+name+' 模式');loadProfiles();}
+async function loadConfig(){const c=await api('/api/config');document.getElementById('cfgThreshold').value=c.autoCleanThreshold;document.getElementById('cfgAutoKill').checked=c.autoKillEnabled;document.getElementById('cfgKillTh').value=c.autoKillThreshold;document.getElementById('cfgLevel').value=c.cleanLevel;document.getElementById('verBadge').textContent='v'+c.version;}
+async function saveConfig(){const body={autoCleanThreshold:+document.getElementById('cfgThreshold').value,autoKillEnabled:document.getElementById('cfgAutoKill').checked,autoKillThreshold:+document.getElementById('cfgKillTh').value,cleanLevel:document.getElementById('cfgLevel').value};await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});showToast('设置已保存');}
+async function checkUpdate(){const box=document.getElementById('updateBox');box.classList.remove('hidden');box.textContent='检查中...';try{const i=await api('/api/update/check');if(i.hasUpdate){box.className='update-box has';box.innerHTML=`新版本 <b>${i.version}</b> 可用<br><button class="btn btn-primary" style="margin-top:8px" onclick="doUpdate()">下载更新</button>`;}else{box.className='update-box';box.textContent='当前已是最新版本';}}catch(e){box.textContent='检查失败: '+e.message;}}
+async function doUpdate(){await api('/api/update/download',{method:'POST'});showToast('更新下载中，重启后生效');}
+function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
+setInterval(refresh,3000);
+refresh();loadProfiles();loadConfig();
+</script>
+</body>
+</html>
