@@ -17,7 +17,7 @@ import (
 	"github.com/HP-jh/TSGMemOptimizer/internal/server"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)

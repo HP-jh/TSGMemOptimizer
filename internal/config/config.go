@@ -29,7 +29,7 @@ var Default = &Config{
 	CleanLevel:         "standard",
 	SkipPaths:          []string{},
 	AllowedPaths:       []string{},
-	Version:            "1.1.0",
+	Version:            "1.2.0",
 	SeenTour:           false,
 }
 

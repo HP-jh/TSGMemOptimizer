@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TSG 内存优化器</title>
 <style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--accent2:#238636;--warn:#d29922;--danger:#da3633;--ok:#3fb950;}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--accent2:#238636;--warn:#d29922;--danger:#da3633;--ok:#3fb950;--shadow:rgba(0,0,0,.25);}
+.light{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--text:#1f2328;--muted:#656d76;--accent:#0969da;--accent2:#1a7f37;--warn:#9a6700;--danger:#cf222e;--ok:#1a7f37;--shadow:rgba(31,35,40,.08);}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
 .header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border)}
@@ -17,7 +18,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 .nav button:hover{color:var(--text)}
 .container{padding:24px;max-width:1200px;margin:0 auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;transition:transform .2s,box-shadow .2s;box-shadow:0 2px 8px var(--shadow)}
+.card:hover{transform:translateY(-2px);box-shadow:0 8px 24px var(--shadow)}
+.btn{transition:transform .1s,opacity .15s}
+.btn:active{transform:scale(.97)}
+.profile-item{transition:border-color .2s,background .2s}
+.settings-row{transition:background .15s}
+.settings-row:hover{background:rgba(88,166,255,.04)}
+@media(max-width:640px){.container{padding:12px}.grid{grid-template-columns:1fr}.process-name{max-width:120px}}
 .card h3{font-size:14px;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
 .gauge{display:flex;align-items:center;justify-content:center;position:relative;width:160px;height:160px;margin:0 auto}
 .gauge svg{transform:rotate(-90deg)}
@@ -64,8 +72,11 @@ canvas{width:100%;height:200px}
 </head>
 <body>
 <div class="header">
-  <h1><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg> TSG 内存优化器 <span class="badge" id="verBadge">v1.0.0</span></h1>
-  <div style="font-size:12px;color:var(--muted)" id="statusText">就绪</div>
+  <h1><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg> TSG 内存优化器 <span class="badge" id="verBadge">v1.2.0</span></h1>
+  <div style="display:flex;align-items:center;gap:12px">
+    <button id="themeBtn" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px" onclick="toggleTheme()" title="切换主题">🌙</button>
+    <div style="font-size:12px;color:var(--muted)" id="statusText">就绪</div>
+  </div>
 </div>
 <div class="nav">
   <button class="active" onclick="showTab('dash')">仪表盘</button>
@@ -175,6 +186,8 @@ async function doUpdate(){await api('/api/update/download',{method:'POST'});show
 async function loadSmart(){try{const s=await api('/api/smart');const box=document.getElementById('smartBox');box.innerHTML=`<p style="margin-bottom:6px"><b>建议：</b>${s.advice}</p><p style="color:var(--muted)">当前模式：${s.profileLabel}</p>`;const killBtn=document.getElementById('killBtn');if(s.actions.includes('kill')){killBtn.classList.remove('hidden');}else{killBtn.classList.add('hidden');}}catch(e){}}
 async function checkTour(){try{const t=await api('/api/tour');if(!t.seen){showTour();}}catch(e){}}
 function showTour(){const steps=[{t:'仪表盘',d:'这里显示内存使用情况，圆环越满代表内存越紧张。'},{t:'一键清理',d:'点击即可释放缓存和临时文件，智能助手会告诉你什么时候该清理。'},{t:'进程页',d:'查看哪些程序占用最多内存，必要时可手动结束。'},{t:'职业模式',d:'选择你的工作类型，我们会自动保护相关程序。'}];let i=0;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:90;display:flex;align-items:center;justify-content:center;';const card=document.createElement('div');card.style.cssText='background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:360px;width:90%;';function render(){card.innerHTML=`<h3 style="margin-bottom:8px">${steps[i].t}</h3><p style="color:var(--muted);margin-bottom:16px;font-size:13px">${steps[i].d}</p><div style="display:flex;justify-content:space-between"><span style="color:var(--muted);font-size:12px">${i+1}/${steps.length}</span><button class="btn btn-primary" onclick="next()">${i===steps.length-1?'开始使用':'下一步'}</button></div>`;}window.next=function(){i++;if(i>=steps.length){overlay.remove();api('/api/tour',{method:'POST'});return;}render();};render();overlay.appendChild(card);document.body.appendChild(overlay);}
+function toggleTheme(){const b=document.body;const btn=document.getElementById('themeBtn');if(b.classList.contains('light')){b.classList.remove('light');btn.textContent='🌙';localStorage.setItem('theme','dark');}else{b.classList.add('light');btn.textContent='☀️';localStorage.setItem('theme','light');}}
+(function(){if(localStorage.getItem('theme')==='light'){document.body.classList.add('light');document.getElementById('themeBtn').textContent='☀️';}})();
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
 setInterval(refresh,3000);
 refresh();loadProfiles();loadConfig();loadSmart();checkTour();
