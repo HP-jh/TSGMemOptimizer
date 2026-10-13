@@ -45,6 +45,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)
 	mux.HandleFunc("/api/update/download", s.handleUpdateDownload)
+	mux.HandleFunc("/api/smart", s.handleSmart)
+	mux.HandleFunc("/api/tour", s.handleTour)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/", s.handleStatic)
 	return mux
@@ -221,6 +223,47 @@ func (s *Server) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		_ = s.updater.Download(info.URL, info.Version)
 	}()
 	writeJSON(w, map[string]string{"status": "downloading", "version": info.Version})
+}
+
+func (s *Server) handleSmart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	mem := s.monitor.Latest()
+	cfg := s.cfg.Get()
+	var actions []string
+	var advice string
+	if mem.UsagePercent >= 90 {
+		advice = "内存严重不足，建议立即深度清理或关闭大内存程序"
+		actions = append(actions, "clean", "kill")
+	} else if mem.UsagePercent >= 75 {
+		advice = "内存占用较高，建议标准清理释放缓存"
+		actions = append(actions, "clean")
+	} else if mem.UsagePercent >= 50 {
+		advice = "内存状态正常，可轻度清理保持流畅"
+		actions = append(actions, "clean")
+	} else {
+		advice = "内存充裕，无需操作"
+	}
+	p, _ := engine.GetProfile(cfg.CurrentProfile)
+	writeJSON(w, map[string]interface{}{
+		"advice":      advice,
+		"actions":     actions,
+		"profile":     cfg.CurrentProfile,
+		"profileLabel": p.Label,
+		"memory":      mem,
+	})
+}
+
+func (s *Server) handleTour(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.cfg.Set(func(c *config.Config) { c.SeenTour = true })
+		_ = config.Save(s.cfg)
+		writeJSON(w, map[string]bool{"seen": true})
+		return
+	}
+	writeJSON(w, map[string]bool{"seen": s.cfg.Get().SeenTour})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -17,6 +17,7 @@ type Config struct {
 	CleanLevel         string   `json:"cleanLevel"`         // light|standard|deep
 	SkipPaths          []string `json:"skipPaths"`          // 跳过路径
 	AllowedPaths       []string `json:"allowedPaths"`       // 允许清理的路径
+	SeenTour           bool     `json:"seenTour"`           // 是否看过引导
 	Version            string   `json:"version"`
 }
 
@@ -28,7 +29,8 @@ var Default = &Config{
 	CleanLevel:         "standard",
 	SkipPaths:          []string{},
 	AllowedPaths:       []string{},
-	Version:            "1.0.0",
+	Version:            "1.1.0",
+	SeenTour:           false,
 }
 
 func Path() string {
