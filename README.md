@@ -70,3 +70,7 @@ curl -X POST http://127.0.0.1:29471/api/ai-schedule \
 ## 与 TSG 网关的关系
 
 TSGMemOptimizer 是独立仓库与独立二进制。TSG 网关（github.com/HP-jh/TarsSecureGuard）v4.8.0+ 可选内置本工具，网关 UI 自动显示「内存优化」入口。
+
+## Changelog
+
+- v1.3.1: routine maintenance and compatibility updates
