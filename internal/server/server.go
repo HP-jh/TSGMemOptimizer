@@ -9,9 +9,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/HP-jh/TSGMemOptimizer/internal/aischedule"
+	"github.com/HP-jh/TSGMemOptimizer/internal/audit"
 	"github.com/HP-jh/TSGMemOptimizer/internal/config"
 	"github.com/HP-jh/TSGMemOptimizer/internal/engine"
+	"github.com/HP-jh/TSGMemOptimizer/internal/guardrail"
 	"github.com/HP-jh/TSGMemOptimizer/internal/updater"
 )
 
@@ -19,18 +23,41 @@ import (
 var webFS embed.FS
 
 type Server struct {
-	monitor *engine.Monitor
-	cleaner *engine.Cleaner
-	pm      *engine.ProcessManager
-	cfg     *config.Config
-	updater *updater.Updater
+	monitor   *engine.Monitor
+	cleaner   *engine.Cleaner
+	pm        *engine.ProcessManager
+	cfg       *config.Config
+	updater   *updater.Updater
+	guard     *guardrail.Guardrail
+	scheduler *aischedule.Scheduler
+	audit     *audit.Logger
+	startedAt time.Time
 }
 
 func New(m *engine.Monitor, c *engine.Cleaner, pm *engine.ProcessManager, cfg *config.Config) *Server {
-	return &Server{
+	g := guardrailFromConfig(cfg)
+	s := &Server{
 		monitor: m, cleaner: c, pm: pm, cfg: cfg,
-		updater: updater.New("HP-jh", "TSGMemOptimizer"),
+		updater:   updater.New("HP-jh", "TSGMemOptimizer"),
+		guard:     g,
+		audit:     audit.New(),
+		startedAt: time.Now(),
 	}
+	s.scheduler = aischedule.New(g, c, pm, m)
+	return s
+}
+
+func guardrailFromConfig(cfg *config.Config) *guardrail.Guardrail {
+	c := cfg.Get()
+	gcfg := &guardrail.Config{
+		MaxCleanMBPerRun:  c.MaxCleanMBPerRun,
+		MaxCleanPerMinute: c.MaxCleanPerMinute,
+		MaxCleanPerHour:   c.MaxCleanPerHour,
+		Whitelist:         c.GuardWhitelist,
+		AIDefaultLevel:    c.AIDefaultLevel,
+		RollbackWindowSec: c.RollbackWindowSec,
+	}
+	return guardrail.New(gcfg)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -48,6 +75,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/smart", s.handleSmart)
 	mux.HandleFunc("/api/tour", s.handleTour)
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/audit", s.handleAudit)
+	// v1.3.0
+	mux.HandleFunc("/api/ai-schedule", s.handleAISchedule)
+	mux.HandleFunc("/api/guardrails", s.handleGuardrails)
+	mux.HandleFunc("/api/guardrails/whitelist", s.handleWhitelist)
+	mux.HandleFunc("/api/rollback", s.handleRollback)
+	mux.HandleFunc("/api/snapshots", s.handleSnapshots)
+	mux.HandleFunc("/api/openai/functions", s.handleOpenAIFunctions)
+	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/", s.handleStatic)
 	return mux
 }
@@ -60,8 +96,8 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 	mem := s.monitor.Latest()
 	gomem := engine.GetGoMemory()
 	writeJSON(w, map[string]interface{}{
-		"system":   mem,
-		"go":       gomem,
+		"system": mem,
+		"go":     gomem,
 		"formatted": map[string]string{
 			"total": engine.FormatBytes(mem.Total),
 			"used":  engine.FormatBytes(mem.Used),
@@ -98,12 +134,34 @@ func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("level") != "" {
 		level = r.URL.Query().Get("level")
 	}
-	res, err := s.cleaner.Clean(level, s.cfg.Get().AllowedPaths, s.cfg.Get().SkipPaths)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+
+	// v1.3.0 护栏检查（非 AI 调用，isAI=false）
+	ok, reason := s.guard.CheckClean(level, s.guard.Config().MaxCleanMBPerRun, false)
+	if !ok {
+		s.audit.LogClean(level, false, reason, 0, 0)
+		writeJSON(w, map[string]interface{}{"allowed": false, "reason": reason, "guardrails": s.guard.Stats()})
 		return
 	}
-	writeJSON(w, res)
+
+	// 回滚快照
+	rollbackID := fmt.Sprintf("rb-%d", time.Now().UnixNano())
+	s.cleaner.TakeSnapshot(rollbackID, s.monitor.Latest(), s.pm.List(), level)
+
+	res, err := s.cleaner.Clean(level, s.cfg.Get().AllowedPaths, s.cfg.Get().SkipPaths)
+	s.guard.RecordClean()
+
+	if err != nil {
+		s.audit.LogClean(level, false, err.Error(), 0, 0)
+		writeJSON(w, map[string]interface{}{"allowed": false, "reason": err.Error()})
+		return
+	}
+	s.audit.LogClean(level, true, "", res.FreedBytes, res.DurationMs)
+	writeJSON(w, map[string]interface{}{
+		"allowed":    true,
+		"result":     res,
+		"rollbackID": rollbackID,
+		"guardrails": s.guard.Stats(),
+	})
 }
 
 func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
@@ -117,10 +175,25 @@ func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid pid", http.StatusBadRequest)
 		return
 	}
+	// 查找进程名检查白名单
+	name := ""
+	for _, p := range s.pm.List() {
+		if p.PID == pid {
+			name = p.Name
+			break
+		}
+	}
+	if s.guard.IsWhitelisted(name) {
+		s.audit.LogKill(pid, name, false, "whitelisted")
+		writeJSON(w, map[string]interface{}{"allowed": false, "reason": fmt.Sprintf("进程 '%s' 在白名单中", name)})
+		return
+	}
 	if err := s.pm.Kill(pid); err != nil {
+		s.audit.LogKill(pid, name, false, err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.audit.LogKill(pid, name, true, "")
 	writeJSON(w, map[string]int{"killed": pid})
 }
 
@@ -184,8 +257,26 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			if v, ok := body["cleanLevel"].(string); ok {
 				c.CleanLevel = v
 			}
+			// v1.3.0
+			if v, ok := body["maxCleanMBPerRun"].(float64); ok {
+				c.MaxCleanMBPerRun = int(v)
+			}
+			if v, ok := body["maxCleanPerMinute"].(float64); ok {
+				c.MaxCleanPerMinute = int(v)
+			}
+			if v, ok := body["maxCleanPerHour"].(float64); ok {
+				c.MaxCleanPerHour = int(v)
+			}
+			if v, ok := body["aiDefaultLevel"].(string); ok {
+				c.AIDefaultLevel = v
+			}
+			if v, ok := body["rollbackWindowSec"].(float64); ok {
+				c.RollbackWindowSec = int(v)
+			}
 		})
 		_ = config.Save(s.cfg)
+		// sync guardrail
+		s.guard = guardrailFromConfig(s.cfg)
 		writeJSON(w, s.cfg.Get())
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -248,11 +339,12 @@ func (s *Server) handleSmart(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := engine.GetProfile(cfg.CurrentProfile)
 	writeJSON(w, map[string]interface{}{
-		"advice":      advice,
-		"actions":     actions,
-		"profile":     cfg.CurrentProfile,
+		"advice":       advice,
+		"actions":      actions,
+		"profile":      cfg.CurrentProfile,
 		"profileLabel": p.Label,
-		"memory":      mem,
+		"memory":       mem,
+		"guardrails":   s.guard.Stats(),
 	})
 }
 
@@ -267,7 +359,156 @@ func (s *Server) handleTour(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"status": "ok", "version": s.cfg.Get().Version})
+	mem := s.monitor.Latest()
+	writeJSON(w, map[string]interface{}{
+		"status":        "ok",
+		"version":       s.cfg.Get().Version,
+		"uptimeSeconds": int(time.Since(s.startedAt).Seconds()),
+		"memory": map[string]interface{}{
+			"usagePercent": mem.UsagePercent,
+			"free":         engine.FormatBytes(mem.Free),
+			"total":        engine.FormatBytes(mem.Total),
+		},
+		"auditStats": s.audit.Stats(),
+	})
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 50
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	entries := s.audit.Recent(limit)
+	writeJSON(w, map[string]interface{}{
+		"entries": entries,
+		"limit":   limit,
+		"count":   len(entries),
+		"stats":   s.audit.Stats(),
+	})
+}
+
+// ---- v1.3.0 AI Schedule ----
+
+func (s *Server) handleAISchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req aischedule.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// try parse OpenAI wrapper
+		var wrap map[string]interface{}
+		if err2 := json.NewDecoder(r.Body).Decode(&wrap); err2 == nil {
+			if args, ok := wrap["args"].(string); ok {
+				parsed, err3 := aischedule.ParseOpenAICall(args)
+				if err3 == nil {
+					req = *parsed
+				}
+			}
+		}
+		if req.AgentID == "" {
+			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	resp := s.scheduler.Handle(&req)
+	s.audit.LogAISchedule(req.Intent, resp.Allowed, resp.Reason)
+	writeJSON(w, resp)
+}
+
+func (s *Server) handleGuardrails(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, s.guard.Stats())
+}
+
+func (s *Server) handleWhitelist(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"whitelist": s.guard.Whitelist()})
+	case http.MethodPost:
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if name := body["add"]; name != "" {
+			s.guard.AddWhitelist(name)
+		}
+		if name := body["remove"]; name != "" {
+			s.guard.RemoveWhitelist(name)
+		}
+		writeJSON(w, map[string]interface{}{"whitelist": s.guard.Whitelist()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	snap, err := s.cleaner.Rollback(id)
+	if err != nil {
+		s.audit.LogRollback(id, false, err.Error())
+		writeJSON(w, map[string]interface{}{"success": false, "reason": err.Error()})
+		return
+	}
+	s.audit.LogRollback(id, true, "")
+	writeJSON(w, map[string]interface{}{
+		"success":  true,
+		"snapshot": snap,
+		"note":     "内存已释放，快照供参考。如需恢复请重启相关进程或等待自然回涨。",
+	})
+}
+
+func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	list := s.cleaner.ListSnapshots()
+	writeJSON(w, map[string]interface{}{"snapshots": list, "count": len(list)})
+}
+
+func (s *Server) handleOpenAIFunctions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"functions": []map[string]interface{}{aischedule.OpenAIFunctionSchema()},
+	})
+}
+
+func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"tools": []map[string]interface{}{aischedule.MCPSchema()},
+	})
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	b, _ := json.Marshal(v)
+	w.Write(b)
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
@@ -285,20 +526,19 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	ct := "application/octet-stream"
 	switch {
-		case strings.HasSuffix(path, ".html"): ct = "text/html; charset=utf-8"
-		case strings.HasSuffix(path, ".css"): ct = "text/css; charset=utf-8"
-		case strings.HasSuffix(path, ".js"): ct = "application/javascript; charset=utf-8"
-		case strings.HasSuffix(path, ".png"): ct = "image/png"
-		case strings.HasSuffix(path, ".svg"): ct = "image/svg+xml"
+	case strings.HasSuffix(path, ".html"):
+		ct = "text/html; charset=utf-8"
+	case strings.HasSuffix(path, ".css"):
+		ct = "text/css; charset=utf-8"
+	case strings.HasSuffix(path, ".js"):
+		ct = "application/javascript; charset=utf-8"
+	case strings.HasSuffix(path, ".png"):
+		ct = "image/png"
+	case strings.HasSuffix(path, ".svg"):
+		ct = "image/svg+xml"
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Write(data)
-}
-
-func writeJSON(w http.ResponseWriter, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	b, _ := json.Marshal(v)
-	w.Write(b)
 }
 
 func (s *Server) RunBackground(ctx context.Context) {
@@ -316,19 +556,19 @@ func (s *Server) autoLoop(ctx context.Context) {
 		mem := s.monitor.Latest()
 		if mem.UsagePercent >= float64(cfg.AutoCleanThreshold) && !s.cleaner.IsCleaning() {
 			p, _ := engine.GetProfile(cfg.CurrentProfile)
-			_, _ = s.cleaner.Clean(p.CleanLevel, cfg.AllowedPaths, cfg.SkipPaths)
+			if ok, _ := s.guard.CheckClean(p.CleanLevel, s.guard.Config().MaxCleanMBPerRun, false); ok {
+				_, _ = s.cleaner.Clean(p.CleanLevel, cfg.AllowedPaths, cfg.SkipPaths)
+				s.guard.RecordClean()
+			}
 		}
 		if cfg.AutoKillEnabled && mem.UsagePercent >= float64(cfg.AutoCleanThreshold+5) {
 			p, _ := engine.GetProfile(cfg.CurrentProfile)
 			_, _ = s.pm.AutoKill(cfg.AutoKillThreshold, p.ProtectPIDs)
 		}
-		// sleep 10s
 		select {
 		case <-ctx.Done():
 			return
-		case <-ctx.Done():
-			return
-		default:
+		case <-time.After(10 * time.Second):
 		}
 	}
 }

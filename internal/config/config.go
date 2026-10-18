@@ -19,6 +19,14 @@ type Config struct {
 	AllowedPaths       []string `json:"allowedPaths"`       // 允许清理的路径
 	SeenTour           bool     `json:"seenTour"`           // 是否看过引导
 	Version            string   `json:"version"`
+
+	// v1.3.0 护栏配置
+	MaxCleanMBPerRun  int      `json:"maxCleanMBPerRun"`  // 单次最大释放 MB
+	MaxCleanPerMinute int      `json:"maxCleanPerMinute"` // 每分钟最大次数
+	MaxCleanPerHour   int      `json:"maxCleanPerHour"`   // 每小时最大次数
+	GuardWhitelist    []string `json:"guardWhitelist"`    // 白名单
+	AIDefaultLevel    string   `json:"aiDefaultLevel"`    // AI 默认级别
+	RollbackWindowSec int      `json:"rollbackWindowSec"` // 回滚窗口
 }
 
 var Default = &Config{
@@ -29,8 +37,14 @@ var Default = &Config{
 	CleanLevel:         "standard",
 	SkipPaths:          []string{},
 	AllowedPaths:       []string{},
-	Version:            "1.2.0",
+	Version:            "1.3.2",
 	SeenTour:           false,
+	MaxCleanMBPerRun:   4096,
+	MaxCleanPerMinute:  3,
+	MaxCleanPerHour:    10,
+	GuardWhitelist:     []string{},
+	AIDefaultLevel:     "light",
+	RollbackWindowSec:  30,
 }
 
 func Path() string {
